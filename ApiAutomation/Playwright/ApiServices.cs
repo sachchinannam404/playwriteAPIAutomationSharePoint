@@ -34,14 +34,7 @@ public sealed class PlaywrightApiClient : IApiClient
     /// <summary>Creates a per-call Playwright context so timeout and headers cannot leak between test cases.</summary>
     public async Task<ApiResponse> SendAsync(ApiRequest request, CancellationToken cancellationToken)
     {
-        // NewContextAsync accepts APIRequestNewContextOptions. APIRequestContextOptions is a
-        // different Playwright options type and causes a compile-time API mismatch.
-        var options = new APIRequestNewContextOptions
-        {
-            ExtraHTTPHeaders = request.Headers,
-            Timeout = request.TimeoutMs,
-            FailOnStatusCode = false
-        };
+        var options = new APIRequestContextOptions { ExtraHTTPHeaders = request.Headers, Timeout = request.TimeoutMs, FailOnStatusCode = false };
         // A short-lived context lets headers and timeout vary safely per SharePoint record.
         await using var context = await _playwright.APIRequest.NewContextAsync(options).ConfigureAwait(false);
         var response = await context.FetchAsync(request.Url.ToString(), new() { Method = request.Method, Data = request.Payload }).WaitAsync(cancellationToken).ConfigureAwait(false);

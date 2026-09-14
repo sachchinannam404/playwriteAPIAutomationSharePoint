@@ -2,6 +2,8 @@ using Xunit;
 using ApiAutomation.Core.Models;
 using ApiAutomation.Core.Validation;
 using ApiAutomation.Playwright;
+using ApiAutomation.Configuration;
+using ApiAutomation.Core.Interfaces;
 
 namespace ApiAutomation.Tests;
 
@@ -43,6 +45,8 @@ public sealed class ValidationAndRequestTests
         Assert.Equal("run:test:1", request.Headers["X-Correlation-ID"]);
     }
 
-    private static TestCaseDefinition TestCase(string endpoint = "/health", string? payload = null, IReadOnlyList<ValidationRule>? rules = null, IReadOnlyDictionary<string, string>? path = null, IReadOnlyDictionary<string, string>? query = null) => new("TC-1", "Smoke", "Customers", endpoint, "GET", "health", true, 1, 200, new Dictionary<string, string>(), query ?? new Dictionary<string, string>(), path ?? new Dictionary<string, string>(), payload, rules ?? []);
-    private sealed class DictionarySecretResolver(string name, string value) : ApiAutomation.Core.Interfaces.ISecretResolver { public string? Resolve(string requested) => requested == name ? value : null; }
+    private static TestCaseDefinition TestCase(string endpoint = "/health", string? payload = null, IReadOnlyList<ValidationRule>? rules = null, IReadOnlyDictionary<string, string>? path = null, IReadOnlyDictionary<string, string>? query = null)
+        => new("TC-1", "Smoke", "API", endpoint, "GET", "health", true, 1, 200, new Dictionary<string, string>(), query ?? new Dictionary<string, string>(), path ?? new Dictionary<string, string>(), payload, rules ?? []);
+
+    private sealed class DictionarySecretResolver(string name, string value) : ISecretResolver { public string? Resolve(string requested) => requested == name ? value : null; }
 }

@@ -38,7 +38,7 @@ public sealed class PlaywrightApiClient : IApiClient
         // A short-lived context lets headers and timeout vary safely per SharePoint record.
         await using var context = await _playwright.APIRequest.NewContextAsync(options).ConfigureAwait(false);
         var response = await context.FetchAsync(request.Url.ToString(), new() { Method = request.Method, Data = request.Payload }).WaitAsync(cancellationToken).ConfigureAwait(false);
-        var headers = await response.AllHeadersAsync().ConfigureAwait(false);
+        var headers = response.Headers;
         return new ApiResponse(response.Status, headers, await response.TextAsync().ConfigureAwait(false));
     }
     /// <summary>Releases Playwright resources after the execution run finishes.</summary>

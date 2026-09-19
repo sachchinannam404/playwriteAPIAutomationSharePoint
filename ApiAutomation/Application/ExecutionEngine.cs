@@ -20,7 +20,7 @@ public sealed class ExecutionEngine(
 {
     private readonly object _progressLock = new();
     private static readonly Regex SensitivePattern = new(
-        @"(?i)(authorization|token|password|secret|api[_-]?key|client[_-]?secret|access[_-]?token)\s*[:=]\s*[\"']?[^\s,\"']+",
+        @"(?i)(authorization|token|password|secret|api[_-]?key|client[_-]?secret|access[_-]?token)\s*[:=]\s*\S+",
         RegexOptions.Compiled);
 
     private static readonly HashSet<string> SensitiveJsonKeys = new(StringComparer.OrdinalIgnoreCase)
@@ -225,11 +225,9 @@ public sealed class ExecutionEngine(
         var masked = SensitivePattern.Replace(value, "$1: ***");
         foreach (var key in SensitiveJsonKeys)
         {
-            masked = Regex.Replace(
-                masked,
-                $@"(""{Regex.Escape(key)}""\s*:\s*)""[^""]*""",
-                $"$1\"***\"",
-                RegexOptions.IgnoreCase);
+            // Match "key": "secretvalue" without nested verbatim-string quote issues.
+            var pattern = "\"" + Regex.Escape(key) + "\"\\s*:\\s*\"[^\"]*\"";
+            masked = Regex.Replace(masked, pattern, "\"" + key + "\": \"***\"", RegexOptions.IgnoreCase);
         }
         return masked;
     }

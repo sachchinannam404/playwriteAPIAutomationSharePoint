@@ -1,24 +1,28 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using ApiAutomation.Configuration;
 using ApiAutomation.Core.Interfaces;
 using ApiAutomation.Core.Models;
+using Microsoft.Extensions.Logging;
 
 namespace ApiAutomation.Data.Repositories;
 
 /// <summary>
 /// Shared Microsoft Graph REST transport for SharePoint list repositories.
-/// Owns transport concerns only: authentication headers, JSON serialization, cancellation, and actionable HTTP failures.
+/// Owns transport concerns only: authentication headers, JSON serialization, cancellation,
+/// correlation headers, 401 token refresh, and actionable HTTP failures.
+/// Tokens are not cached indefinitely; a 401 triggers Invalidate + one retry with a fresh token.
 /// </summary>
 public sealed class SharePointRestClient : IAsyncDisposable
 {
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;
     private readonly ITokenProvider _tokenProvider;
-    private string? _cachedToken;
+    private readonly ILogger _log;
+    private string? _requestCorrelationId;
 
-    /// <summary>Creates an authenticated Graph client. Token is resolved lazily on first request and can be refreshed by the provider.</summary>
     public SharePointRestClient(SharePointSettings settings, ITokenProvider tokenProvider, HttpClient? http = null)
     {
         ArgumentNullException.ThrowIfNull(settings);
@@ -26,20 +30,24 @@ public sealed class SharePointRestClient : IAsyncDisposable
         _tokenProvider = tokenProvider;
         _ownsHttp = http is null;
         _http = http ?? new HttpClient { BaseAddress = new Uri("https://graph.microsoft.com/v1.0/") };
-        _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        if (!_http.DefaultRequestHeaders.Accept.Any())
+            _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        _log = FrameworkLogging.CreateLogger(nameof(SharePointRestClient));
     }
 
-    /// <summary>Backward-compatible constructor that wraps a secret name as an EnvironmentTokenProvider.</summary>
     public SharePointRestClient(SharePointSettings settings, ISecretResolver secrets, HttpClient? http = null)
         : this(settings, new EnvironmentTokenProvider(secrets, settings.AccessTokenSecret), http)
     {
     }
 
+    /// <summary>Optional correlation ID applied to subsequent Graph requests (client-request-id / X-Correlation-ID).</summary>
+    public void SetCorrelationId(string? correlationId) => _requestCorrelationId = correlationId;
+
     public async Task<JsonDocument> GetJsonAsync(string relativeOrAbsoluteUrl, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, relativeOrAbsoluteUrl);
-        await ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
-        using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await SendWithAuthRetryAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, relativeOrAbsoluteUrl),
+            cancellationToken).ConfigureAwait(false);
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
         return JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
     }
@@ -52,19 +60,60 @@ public sealed class SharePointRestClient : IAsyncDisposable
 
     private async Task SendJsonAsync(HttpMethod method, string relativeOrAbsoluteUrl, object payload, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(method, relativeOrAbsoluteUrl)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(payload, JsonDefaults.Options), Encoding.UTF8, "application/json")
-        };
-        await ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
-        using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var json = JsonSerializer.Serialize(payload, JsonDefaults.Options);
+        using var response = await SendWithAuthRetryAsync(
+            () => new HttpRequestMessage(method, relativeOrAbsoluteUrl)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            },
+            cancellationToken).ConfigureAwait(false);
         await EnsureSuccessAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends the request with a fresh token. On 401, invalidates the provider and retries once.
+    /// </summary>
+    private async Task<HttpResponseMessage> SendWithAuthRetryAsync(
+        Func<HttpRequestMessage> createRequest,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            using var request = createRequest();
+            await ApplyAuthAsync(request, cancellationToken).ConfigureAwait(false);
+            ApplyCorrelation(request);
+
+            _log.LogDebug("Graph {Method} {Url} attempt={Attempt} correlation={Correlation}",
+                request.Method, request.RequestUri, attempt + 1, _requestCorrelationId);
+
+            var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized && attempt == 0)
+            {
+                _log.LogWarning("Graph returned 401; invalidating token and retrying once. correlation={Correlation}",
+                    _requestCorrelationId);
+                response.Dispose();
+                _tokenProvider.Invalidate();
+                continue;
+            }
+
+            return response;
+        }
+
+        throw new InvalidOperationException("Unreachable auth-retry state.");
     }
 
     private async Task ApplyAuthAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        _cachedToken ??= await _tokenProvider.GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _cachedToken);
+        var token = await _tokenProvider.GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+    }
+
+    private void ApplyCorrelation(HttpRequestMessage request)
+    {
+        if (string.IsNullOrWhiteSpace(_requestCorrelationId)) return;
+        request.Headers.TryAddWithoutValidation("client-request-id", _requestCorrelationId);
+        request.Headers.TryAddWithoutValidation("X-Correlation-ID", _requestCorrelationId);
     }
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken)

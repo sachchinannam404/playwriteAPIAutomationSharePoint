@@ -45,6 +45,7 @@ public sealed class ExecutionEngine(
         {
             foreach (var definition in definitions)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var result = await ExecuteOneAsync(id, definition, environment, cancellationToken).ConfigureAwait(false);
                 output.Add(result);
                 ReportProgress(result);
@@ -71,6 +72,9 @@ public sealed class ExecutionEngine(
             });
             await Task.WhenAll(tasks).ConfigureAwait(false);
         }
+
+        if (results is IBatchedResultRepository batched)
+            await batched.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         var summary = new ExecutionSummary(id, started, DateTimeOffset.UtcNow, output.OrderBy(x => x.TestCaseId, StringComparer.Ordinal).ToArray());
         try
@@ -135,13 +139,13 @@ public sealed class ExecutionEngine(
 
             for (var attempt = 1; attempt <= settings.MaxRetries + 1; attempt++)
             {
+                ct.ThrowIfCancellationRequested();
                 try
                 {
                     var response = await api
                         .SendAsync(requests.Build(test, env, $"{executionId}:{test.Id}:{attempt}"), ct)
                         .ConfigureAwait(false);
 
-                    // Treat configured status codes as transient so callers can retry 429/5xx without coding it per test.
                     if (attempt <= settings.MaxRetries && settings.RetryableStatusCodes.Contains(response.StatusCode))
                     {
                         await DelayWithBackoffAsync(attempt, ct).ConfigureAwait(false);
@@ -202,7 +206,6 @@ public sealed class ExecutionEngine(
 
     private async Task DelayWithBackoffAsync(int attempt, CancellationToken ct)
     {
-        // Exponential backoff with small jitter: base * 2^(attempt-1) + 0..250ms
         var delayMs = settings.BaseRetryDelayMs * (1 << Math.Min(attempt - 1, 6));
         delayMs += Random.Shared.Next(0, 250);
         await Task.Delay(TimeSpan.FromMilliseconds(delayMs), ct).ConfigureAwait(false);
@@ -218,14 +221,12 @@ public sealed class ExecutionEngine(
         return body[..settings.ResponseBodyLimit] + " [truncated]";
     }
 
-    /// <summary>Masks common secret key/value patterns and known sensitive JSON keys before persistence.</summary>
     private static string? Mask(string? value)
     {
         if (value is null) return null;
         var masked = SensitivePattern.Replace(value, "$1: ***");
         foreach (var key in SensitiveJsonKeys)
         {
-            // Match "key": "secretvalue" without nested verbatim-string quote issues.
             var pattern = "\"" + Regex.Escape(key) + "\"\\s*:\\s*\"[^\"]*\"";
             masked = Regex.Replace(masked, pattern, "\"" + key + "\": \"***\"", RegexOptions.IgnoreCase);
         }

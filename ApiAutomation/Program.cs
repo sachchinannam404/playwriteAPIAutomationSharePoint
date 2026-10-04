@@ -59,10 +59,17 @@ try
         settings,
         new ConsoleProgressSink());
 
-    var summary = await engine.ExecuteAsync(filter, CancellationToken.None);
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; Console.Error.WriteLine("Cancellation requested…"); cts.Cancel(); };
+    var summary = await engine.ExecuteAsync(filter, cts.Token);
     return summary.Failed > 0 || summary.PublicationFailures > 0 ? 1 : 0;
 
     string? Get(string name) => options.TryGetValue(name, out var value) ? value : null;
+}
+catch (OperationCanceledException)
+{
+    Console.Error.WriteLine("Run cancelled.");
+    return 130;
 }
 catch (Exception e)
 {
@@ -103,6 +110,7 @@ static void PrintHelp()
           0  All selected cases passed and results published
           1  Functional failures and/or publication failures
           2  Framework / configuration error
+          130  Cancelled (Ctrl+C)
         """);
 }
 

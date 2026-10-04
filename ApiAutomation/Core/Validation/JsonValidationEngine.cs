@@ -43,11 +43,10 @@ public sealed class JsonValidationEngine : IValidationEngine
     private static ValidationResult ValidateRule(ValidationRule rule, ApiResponse response, JsonDocument? json)
     {
         if (rule.Type.Equals("header", StringComparison.OrdinalIgnoreCase))
-            return Compare(
-                rule.Id,
-                response.Headers.TryGetValue(rule.Path ?? "", out var value) ? value : null,
-                rule.ExpectedValue,
-                rule.Operator ?? "equals");
+        {
+            var actual = FindHeader(response.Headers, rule.Path);
+            return Compare(rule.Id, actual, rule.ExpectedValue, rule.Operator ?? "equals");
+        }
 
         if (!rule.Type.StartsWith("json", StringComparison.OrdinalIgnoreCase))
             return new(rule.Id, false, rule.ExpectedValue ?? "", null, $"Unsupported validation type '{rule.Type}'.");
@@ -55,29 +54,46 @@ public sealed class JsonValidationEngine : IValidationEngine
         if (!TryGetJsonPath(json!.RootElement, rule.Path, out var element))
             return new(rule.Id, false, rule.ExpectedValue ?? "exists", null, $"JSON path '{rule.Path}' was not found.");
 
-        var actual = element.ValueKind == JsonValueKind.String ? element.GetString() : element.GetRawText();
-        return Compare(rule.Id, actual, rule.ExpectedValue, rule.Operator ?? rule.Type[4..]);
+        var actualValue = element.ValueKind == JsonValueKind.String ? element.GetString() : element.GetRawText();
+        return Compare(rule.Id, actualValue, rule.ExpectedValue, rule.Operator ?? rule.Type[4..]);
+    }
+
+    /// <summary>Case-insensitive header lookup (Playwright and most HTTP stacks lower-case header names).</summary>
+    private static string? FindHeader(IReadOnlyDictionary<string, string> headers, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        if (headers.TryGetValue(name, out var exact)) return exact;
+        foreach (var kv in headers)
+        {
+            if (string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase))
+                return kv.Value;
+        }
+        return null;
     }
 
     private static ValidationResult Compare(string id, string? actual, string? expected, string operation)
     {
-        var passed = operation.ToLowerInvariant() switch
+        var op = operation.ToLowerInvariant();
+        var passed = op switch
         {
             "exists" => actual is not null,
             "not-null" => !string.IsNullOrWhiteSpace(actual) && actual != "null",
             "contains" => actual?.Contains(expected ?? "", StringComparison.OrdinalIgnoreCase) == true,
-            "greater-than" => decimal.TryParse(actual, out var a) && decimal.TryParse(expected, out var e) && a > e,
-            "equals" or "" => string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase),
+            "starts-with" or "startswith" => actual?.StartsWith(expected ?? "", StringComparison.OrdinalIgnoreCase) == true,
+            "ends-with" or "endswith" => actual?.EndsWith(expected ?? "", StringComparison.OrdinalIgnoreCase) == true,
+            "greater-than" or "gt" => decimal.TryParse(actual, out var aGt) && decimal.TryParse(expected, out var eGt) && aGt > eGt,
+            "less-than" or "lt" => decimal.TryParse(actual, out var aLt) && decimal.TryParse(expected, out var eLt) && aLt < eLt,
+            "not-equals" or "ne" or "not-equal" => !string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase),
+            "regex" or "matches" => actual is not null && expected is not null &&
+                                     Regex.IsMatch(actual, expected, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant),
+            "equals" or "" or "eq" => string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase),
             _ => false
         };
 
-        return new(id, passed, expected ?? "", actual, passed ? null : $"Expected {operation} '{expected}', received '{actual}'.");
+        return new(id, passed, expected ?? "", actual,
+            passed ? null : $"Expected {operation} '{expected}', received '{actual}'.");
     }
 
-    /// <summary>
-    /// Traverses a dot-delimited path with optional array indexes: <c>data.items[0].id</c>, <c>$.user.name</c>.
-    /// Wildcard / filter expressions are not yet supported.
-    /// </summary>
     private static bool TryGetJsonPath(JsonElement root, string? path, out JsonElement element)
     {
         element = root;
@@ -99,7 +115,6 @@ public sealed class JsonValidationEngine : IValidationEngine
             }
             else if (int.TryParse(part, out var bareIndex))
             {
-                // Support numeric segments after an array property, e.g. items.0.id
                 if (element.ValueKind != JsonValueKind.Array || bareIndex < 0 || bareIndex >= element.GetArrayLength())
                     return false;
                 element = element[bareIndex];
